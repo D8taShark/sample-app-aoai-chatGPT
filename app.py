@@ -5,6 +5,17 @@ import logging
 import uuid
 import httpx
 import asyncio
+import time
+from azure.core.credentials import AzureKeyCredential
+from opencensus.ext.azure.trace_exporter import AzureExporter
+from opencensus.ext.azure.metrics_exporter import new_metrics_exporter
+from opencensus.trace.samplers import ProbabilitySampler
+from opencensus.trace.tracer import Tracer
+from opencensus.stats import stats as stats_module
+from opencensus.stats import measure as measure_module
+from opencensus.stats import view as view_module
+from opencensus.stats import aggregation as aggregation_module
+from opencensus.tags import tag_map as tag_map_module, TagKey
 from quart import (
     Blueprint,
     Quart,
@@ -21,6 +32,8 @@ from azure.identity.aio import (
     DefaultAzureCredential,
     get_bearer_token_provider
 )
+from opencensus.ext.azure.log_exporter import AzureLogHandler
+from azure.core.credentials import AzureKeyCredential
 from backend.auth.auth_utils import get_authenticated_user_details
 from backend.security.ms_defender_utils import get_msdefender_user_json
 from backend.history.cosmosdbservice import CosmosConversationClient
@@ -79,14 +92,47 @@ async def assets(path):
 
 
 # Debug settings
+# Debug settings
 DEBUG = os.environ.get("DEBUG", "false")
 if DEBUG.lower() == "true":
     logging.basicConfig(level=logging.DEBUG)
+    logging.debug("Debug logging enabled")
+"""
+Application Insights integration
+"""
+# Read App Insights connection string or instrumentation key from environment
+ai_conn = os.getenv("APP_INSIGHTS_CONNECTION_STRING") or os.getenv("APP_INSIGHTS_INSTRUMENTATION_KEY")
+if ai_conn:
+    try:
+        ai_handler = AzureLogHandler(connection_string=ai_conn)
+        logging.getLogger().addHandler(ai_handler)
+        logging.info("Application Insights LogHandler enabled. ConnectionString=%s", ai_conn)
+    except Exception as e:
+        logging.warning("Failed to configure Application Insights LogHandler: %s", e)
+# Warn if Agents are enabled but configuration is invalid
+if os.getenv("AZURE_AI_AGENT_ENABLED", "").lower() == "true" and not app_settings.azure_agent:
+    logging.warning(
+        "AZURE_AI_AGENT_ENABLED is true but no valid Azure AI Agent configuration was found; "
+        "chat will fall back to standard Azure OpenAI or Prompt Flow paths."
+    )
+# Log successful Agent config load for transparency
+if app_settings.azure_agent:
+    cfg = app_settings.azure_agent
+    logging.info(
+        "Azure AI Agent is enabled: endpoint=%s, resource=%s, project=%s, deployment=%s, preview_api_version=%s",
+        cfg.endpoint,
+        cfg.resource,
+        cfg.project,
+        cfg.deployment,
+        cfg.preview_api_version,
+    )
 
 USER_AGENT = "GitHubSampleWebApp/AsyncAzureOpenAI/1.0.0"
 
 
-# Frontend Settings via Environment Variables
+"""
+Expose frontend configuration (including Azure AI Agent settings) via environment variables.
+"""
 frontend_settings = {
     "auth_enabled": app_settings.base_settings.auth_enabled,
     "feedback_enabled": (
@@ -104,6 +150,15 @@ frontend_settings = {
     },
     "sanitize_answer": app_settings.base_settings.sanitize_answer,
     "oyd_enabled": app_settings.base_settings.datasource_type,
+    "agent_enabled": bool(app_settings.azure_agent),
+    # Azure AI Agent configuration (for frontend transparency; key is omitted)
+    "azure_agent": {
+        "endpoint": app_settings.azure_agent.endpoint if app_settings.azure_agent else None,
+        "resource": app_settings.azure_agent.resource if app_settings.azure_agent else None,
+        "project": app_settings.azure_agent.project if app_settings.azure_agent else None,
+        "deployment": app_settings.azure_agent.deployment if app_settings.azure_agent else None,
+        "preview_api_version": app_settings.azure_agent.preview_api_version if app_settings.azure_agent else None,
+    }
 }
 
 
@@ -162,18 +217,31 @@ async def init_openai_client():
         # Default Headers
         default_headers = {"x-ms-useragent": USER_AGENT}
 
-        # Remote function calls
+        # Remote function calls - ensure config present and reset previous tools
         if app_settings.azure_openai.function_call_azure_functions_enabled:
-            azure_functions_tools_url = f"{app_settings.azure_openai.function_call_azure_functions_tools_base_url}?code={app_settings.azure_openai.function_call_azure_functions_tools_key}"
+            base = app_settings.azure_openai.function_call_azure_functions_tools_base_url
+            key = app_settings.azure_openai.function_call_azure_functions_tools_key
+            if not base or not key:
+                raise ValueError("Function-calling via Azure Functions enabled but base URL or key is missing")
+            azure_openai_tools.clear()
+            azure_openai_available_tools.clear()
+            url = f"{base}?code={key}"
             async with httpx.AsyncClient() as client:
-                response = await client.get(azure_functions_tools_url)
-            response_status_code = response.status_code
-            if response_status_code == httpx.codes.OK:
-                azure_openai_tools.extend(json.loads(response.text))
-                for tool in azure_openai_tools:
-                    azure_openai_available_tools.append(tool["function"]["name"])
+                response = await client.get(url)
+            if response.status_code == httpx.codes.OK:
+                try:
+                    tools = json.loads(response.text)
+                except ValueError:
+                    logging.error("Failed to parse tools JSON from Azure Functions: %s", response.text)
+                else:
+                    azure_openai_tools.extend(tools)
+                    for tool in tools:
+                        # each tool is a dict with 'function' sub-dict
+                        name = tool.get("function", {}).get("name")
+                        if name:
+                            azure_openai_available_tools.append(name)
             else:
-                logging.error(f"An error occurred while getting OpenAI Function Call tools metadata: {response.status_code}")
+                logging.error("Error fetching function definitions: HTTP %s", response.status_code)
 
         
         azure_openai_client = AsyncAzureOpenAI(
@@ -185,25 +253,127 @@ async def init_openai_client():
         )
 
         return azure_openai_client
-    except Exception as e:
-        logging.exception("Exception in Azure OpenAI initialization", e)
+    except Exception:
+        logging.exception("Exception in Azure OpenAI initialization")
         azure_openai_client = None
         raise e
+
+async def init_agent_client():
+    """
+    Initialize the Azure AI Agent client if configured.
+    """
+    if not app_settings.azure_agent:
+        logging.debug("init_agent_client: Azure AI Agent not configured; skipping AgentClient initialization.")
+        return None
+    try:
+        cfg = app_settings.azure_agent
+        credential = AzureKeyCredential(cfg.key) if cfg.key else DefaultAzureCredential()
+        from azure.ai.language.agent import AgentClient
+
+        endpoint = cfg.endpoint
+        if not endpoint.endswith("/"):
+            endpoint = endpoint + "/"
+
+        logging.debug(
+            "Initializing Azure AI AgentClient: endpoint=%s, project=%s, deployment=%s, api_version=%s",
+            endpoint,
+            cfg.project,
+            cfg.deployment,
+            cfg.preview_api_version,
+        )
+        agent_client = AgentClient(
+            endpoint=endpoint,
+            credential=credential,
+            api_version=cfg.preview_api_version
+        )
+        logging.info("Initialized Azure AI AgentClient successfully.")
+        return agent_client
+    except Exception:
+        logging.exception("Exception in Azure AI Agent initialization")
+        raise
+
+async def send_agent_chat_request(request_body, request_headers):
+    """
+    Send a chat request to the Azure AI Agent.
+    """
+    agent_client = await init_agent_client()
+    if not agent_client:
+        raise RuntimeError("Azure AI Agent client is not configured")
+
+    cfg = app_settings.azure_agent
+    inputs = {"messages": request_body.get("messages", [])}
+    # Log the request parameters for transparency
+    project_label = cfg.project or ''
+    deployment_label = cfg.deployment or ''
+    msg_count = len(inputs.get("messages", []))
+    logging.debug(
+        "send_agent_chat_request: invoking agent with project=%s, deployment=%s, messages_count=%d",
+        project_label,
+        deployment_label,
+        msg_count,
+    )
+    try:
+        with AGENT_INVOKE_DURATION.labels(project_label, deployment_label).time():
+            if cfg.project:
+                response = await agent_client.invoke_agent(
+                    project_name=cfg.project,
+                    deployment_name=cfg.deployment,
+                    **inputs
+                )
+            else:
+                response = await agent_client.invoke_agent(
+                    deployment_name=cfg.deployment,
+                    **inputs
+                )
+        AGENT_INVOKE_COUNTER.labels(project_label, deployment_label).inc()
+        logging.info(
+            "Azure AI Agent invoke_agent completed for project=%s, deployment=%s, messages_count=%d",
+            project_label,
+            deployment_label,
+            msg_count,
+        )
+        return response
+    except Exception as err:
+        AGENT_INVOKE_ERRORS.labels(project_label, deployment_label).inc()
+        logging.error(
+            "Error in Azure AI Agent invoke_agent for project=%s, deployment=%s: %s",
+            project_label,
+            deployment_label,
+            err,
+            exc_info=True
+        )
+        raise
+
+async def complete_agent_chat_request(request_body, request_headers):
+    """
+    Complete a chat request using Azure AI Agent.
+    """
+    response = await send_agent_chat_request(request_body, request_headers)
+    return jsonify(response)
 
 async def openai_remote_azure_function_call(function_name, function_args):
     if app_settings.azure_openai.function_call_azure_functions_enabled is not True:
         return
 
-    azure_functions_tool_url = f"{app_settings.azure_openai.function_call_azure_functions_tool_base_url}?code={app_settings.azure_openai.function_call_azure_functions_tool_key}"
-    headers = {'content-type': 'application/json'}
-    body = {
-        "tool_name": function_name,
-        "tool_arguments": json.loads(function_args)
-    }
+    # Prepare tool endpoint
+    base = app_settings.azure_openai.function_call_azure_functions_tool_base_url
+    key = app_settings.azure_openai.function_call_azure_functions_tool_key
+    if not base or not key:
+        raise ValueError("Function-calling via Azure Functions enabled but tool URL or key is missing")
+    url = f"{base}?code={key}"
+    # Normalize arguments: accept dict or JSON string
+    args = function_args
+    if isinstance(function_args, str):
+        try:
+            args = json.loads(function_args)
+        except ValueError:
+            logging.error("Invalid JSON for tool arguments: %s", function_args)
+            args = {}
+    payload = {"tool_name": function_name, "tool_arguments": args}
+    headers = {'Content-Type': 'application/json'}
     async with httpx.AsyncClient() as client:
-        response = await client.post(azure_functions_tool_url, data=json.dumps(body), headers=headers)
+        response = await client.post(url, json=payload, headers=headers)
     response.raise_for_status()
-
     return response.text
 
 async def init_cosmosdb_client():
@@ -228,8 +398,8 @@ async def init_cosmosdb_client():
                 container_name=app_settings.chat_history.conversations_container,
                 enable_message_feedback=app_settings.chat_history.enable_feedback,
             )
-        except Exception as e:
-            logging.exception("Exception in CosmosDB initialization", e)
+        except Exception:
+            logging.exception("Exception in CosmosDB initialization")
             cosmos_conversation_client = None
             raise e
     else:
@@ -561,6 +731,17 @@ async def stream_chat_request(request_body, request_headers):
 
 async def conversation_internal(request_body, request_headers):
     try:
+        # Log the routing decision for transparency
+        logging.debug(
+            "conversation_internal: agent_enabled=%s, use_promptflow=%s, azure_openai_stream=%s",
+            bool(app_settings.azure_agent),
+            app_settings.base_settings.use_promptflow,
+            app_settings.azure_openai.stream,
+        )
+        # Azure AI Agent path
+        if app_settings.azure_agent:
+            return await complete_agent_chat_request(request_body, request_headers)
+        # existing Prompt Flow vs standard chat
         if app_settings.azure_openai.stream and not app_settings.base_settings.use_promptflow:
             result = await stream_chat_request(request_body, request_headers)
             response = await make_response(format_as_ndjson(result))
@@ -595,6 +776,12 @@ def get_frontend_settings():
     except Exception as e:
         logging.exception("Exception in /frontend_settings")
         return jsonify({"error": str(e)}), 500
+    
+@bp.route("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    data = generate_latest()
+    return make_response(data, 200, {"Content-Type": CONTENT_TYPE_LATEST})
 
 
 ## Conversation History API ##

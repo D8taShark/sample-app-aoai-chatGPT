@@ -150,7 +150,17 @@ Note: RBAC assignments can take a few minutes before becoming effective.
     |AZURE_OPENAI_STOP_SEQUENCE|No||Up to 4 sequences where the API will stop generating further tokens. Represent these as a string joined with "|", e.g. `"stop1|stop2|stop3"`|
     |AZURE_OPENAI_SYSTEM_MESSAGE|No|You are an AI assistant that helps people find information.|A brief description of the role and tone the model should use|
     |AZURE_OPENAI_STREAM|No|True|Whether or not to use streaming for the response. Note: Setting this to true prevents the use of prompt flow.|
-    |AZURE_OPENAI_EMBEDDING_NAME|Only if using vector search using an Azure OpenAI embedding model||The name of your embedding model deployment if using vector search.
+    |AZURE_OPENAI_EMBEDDING_NAME|Only if using vector search using an Azure OpenAI embedding model||The name of your embedding model deployment if using vector search.|
+    
+    |AZURE_AI_AGENT_ENABLED|No|False|Enable routing of chat through Azure AI Agents instead of raw Azure OpenAI or Prompt Flow.|
+    |AZURE_AI_AGENT_RESOURCE|Only if using resource| |The name of your Cognitive Services resource that hosts AI Agents (only RESOURCE or ENDPOINT is required).|
+    |AZURE_AI_AGENT_ENDPOINT|Only if using endpoint||The full endpoint URL of your Cognitive Services resource hosting AI Agents (only RESOURCE or ENDPOINT is required).|
+    |AZURE_AI_AGENT_KEY|Optional if using Managed Identity||API key for your Cognitive Services resource (omit to use Managed Identity).|
+    |AZURE_AI_AGENT_PROJECT|No||Optional Agent project name; if omitted, a standalone deployment is invoked.|
+    |AZURE_AI_AGENT_DEPLOYMENT|Yes||The name of your Agent deployment (within a project or standalone).|
+    |AZURE_AI_AGENT_PREVIEW_API_VERSION|No|Same as default|Override the preview API version for the AgentClient.|
+    |APP_INSIGHTS_CONNECTION_STRING|No||Instrumentation connection string for Azure Application Insights (used for logging & metrics).|
+    |APP_INSIGHTS_INSTRUMENTATION_KEY|No||Instrumentation key for Azure Application Insights (alternative to connection string).|
 
     See the [documentation](https://learn.microsoft.com/en-us/azure/cognitive-services/openai/reference#example-response-2) for more information on these parameters.
 
