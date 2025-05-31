@@ -150,10 +150,11 @@ Note: RBAC assignments can take a few minutes before becoming effective.
     |AZURE_OPENAI_STOP_SEQUENCE|No||Up to 4 sequences where the API will stop generating further tokens. Represent these as a string joined with "|", e.g. `"stop1|stop2|stop3"`|
     |AZURE_OPENAI_SYSTEM_MESSAGE|No|You are an AI assistant that helps people find information.|A brief description of the role and tone the model should use|
     |AZURE_OPENAI_STREAM|No|True|Whether or not to use streaming for the response. Note: Setting this to true prevents the use of prompt flow.|
+<<<<<<< HEAD
     |AZURE_OPENAI_EMBEDDING_NAME|Only if using vector search using an Azure OpenAI embedding model||The name of your embedding model deployment if using vector search.|
-    
-    |AZURE_AI_AGENT_ENABLED|No|False|Enable routing of chat through Azure AI Agents instead of raw Azure OpenAI or Prompt Flow.|
-    |AZURE_AI_AGENT_RESOURCE|Only if using resource| |The name of your Cognitive Services resource that hosts AI Agents (only RESOURCE or ENDPOINT is required).|
+    |MS_DEFENDER_ENABLED|No|True|Whether or not Microsoft Defender for Cloud’s threat protection for AI workloads is enabled on your subscription (see https://learn.microsoft.com/azure/defender-for-cloud/gain-end-user-context-ai).|
+    |AZURE_AI_AGENT_ENABLED|No|False|Route chat through Azure AI Agents instead of raw Azure OpenAI or Prompt Flow.|
+    |AZURE_AI_AGENT_RESOURCE|Only if using resource||The name of your Cognitive Services resource that hosts AI Agents (only RESOURCE or ENDPOINT is required).|
     |AZURE_AI_AGENT_ENDPOINT|Only if using endpoint||The full endpoint URL of your Cognitive Services resource hosting AI Agents (only RESOURCE or ENDPOINT is required).|
     |AZURE_AI_AGENT_KEY|Optional if using Managed Identity||API key for your Cognitive Services resource (omit to use Managed Identity).|
     |AZURE_AI_AGENT_PROJECT|No||Optional Agent project name; if omitted, a standalone deployment is invoked.|
@@ -386,10 +387,10 @@ Refer to this article to learn more about [function calling with Azure OpenAI Se
     The request body will be a JSON structure with the function name and arguments of the function to be executed.   
     Use this sample as function request body to test your function call:
 
-        ```
+        ```json
         {
-            "tool_name" : "get_current_weather",
-            "tool_arguments" : {"location":"Lamego"}
+          "tool_name": "get_current_weather",
+          "tool_arguments": { "location": "Lamego" }
         }
         ```
 
@@ -478,7 +479,7 @@ Refer to this article to learn more about [function calling with Azure OpenAI Se
         return f"The current weather in {location} is {temperature}°C and {weather}."
     ```
 
-4. Configure data source settings as described in the table below:
+5. Configure data source settings as described in the table below:
 
     | App Setting | Required? | Default Value | Note |
     | ----------- | --------- | ------------- | ---- |
